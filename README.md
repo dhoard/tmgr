@@ -18,9 +18,11 @@ Download the latest release from the releases page.
 
 ### Build from source
 
+Requires Go, [GoReleaser](https://goreleaser.com/), and [UPX](https://upx.github.io/).
+
 ```bash
-go build -o tmgr .
-sudo install -m 755 tmgr /usr/local/bin/tmgr
+./build-and-package.sh
+sudo install -m 755 bin/tmgr /usr/local/bin/tmgr
 ```
 
 ## Usage
@@ -42,13 +44,17 @@ tmgr
 ## Building
 
 ```bash
-go build -o tmgr .
+./build-and-package.sh
 ```
 
-## Packaging
+This runs tests, vet, cross-compiles all targets, and compresses binaries
+with UPX. The local binary is placed at `bin/tmgr` and distributable
+archives are placed in `package/`.
+
+For a quick local build without GoReleaser or UPX:
 
 ```bash
-./build-and-package.sh
+go build -o tmgr .
 ```
 
 ## License
