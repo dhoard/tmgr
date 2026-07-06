@@ -9,6 +9,11 @@ Instructions for any coding agent working in this repository.
 - **Language**: Go 1.21
 - **Module path**: `github.com/dhoard/tmgr`
 
+## General Coding Principles
+
+Reusable engineering discipline for coding agents. See
+`.pi/prompts/coding-principles.md`.
+
 ## Build, Test, and Validation Commands
 
 All commands are run from the project root (where `go.mod` lives).
