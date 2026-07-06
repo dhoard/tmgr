@@ -1,0 +1,27 @@
+version: 2
+
+builds:
+  - id: tmgr
+    main: .
+    binary: tmgr
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+      - "386"
+    ldflags:
+      - -s -w -X main.version={{.Env.TMGR_VERSION}}
+
+archives:
+  - formats: ['tar.gz']
+    name_template: "tmgr_{{ .Env.TMGR_VERSION }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
