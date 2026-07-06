@@ -60,3 +60,8 @@ go build -o tmgr .
 ## License
 
 MIT
+
+---
+
+Copyright (c) 2026-present Douglas Hoard
+
