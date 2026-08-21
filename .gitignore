@@ -3,5 +3,6 @@ bin/
 dist/
 package/
 .pi/plans/
+.pi/specs/
 squash-and-push.sh
 

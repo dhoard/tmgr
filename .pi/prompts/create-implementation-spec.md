@@ -42,8 +42,10 @@ before continuing.
 ## Output
 
 Write the specification to the file path specified by the user. If no path
-is specified, write to `.pi/plans/<action>-<description>.md` using the
+is specified, write to `.pi/specs/<action>-<description>.md` using the
 same naming convention as the design plan.
+
+Create `.pi/specs/` if it does not exist.
 
 Do not write or update any other file.
 

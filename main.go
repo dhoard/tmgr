@@ -1,3 +1,17 @@
+//
+// Copyright (c) 2026-present Douglas Hoard
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+
 package main
 
 import (
@@ -6,6 +20,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -16,8 +31,8 @@ var version = "dev"
 
 // Session represents a tmux session
 type Session struct {
-	Name   string
-	Windows int
+	Name     string
+	Windows  int
 	Attached bool
 }
 
@@ -54,14 +69,23 @@ var (
 
 // model represents the Bubble Tea model
 type model struct {
-	sessions  []Session
-	cursor    int
-	selected  *Session
-	quitting  bool
-	renaming  bool
-	newName   string
-	err       error
+	sessions       []Session
+	cursor         int
+	selected       *Session
+	quitting       bool
+	renaming       bool
+	newName        string
+	creating       bool
+	newSessionName string
+	createErr      string
+	err            error
 }
+
+// Test seams for the tmux-backed functions used in the create flow
+var (
+	createSessionFn = createSession
+	getSessionsFn   = getSessions
+)
 
 // Initial model
 func initialModel(sessions []Session) model {
@@ -116,6 +140,55 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// Handle create mode
+		if m.creating {
+			switch msg.String() {
+			case "esc":
+				m.creating = false
+				m.newSessionName = ""
+				return m, nil
+
+			case "enter":
+				if m.newSessionName == "" {
+					return m, nil
+				}
+				name := m.newSessionName
+				m.creating = false
+				m.newSessionName = ""
+				if err := createSessionFn(name); err != nil {
+					m.createErr = err.Error()
+					return m, nil
+				}
+				sessions, err := getSessionsFn()
+				if err != nil {
+					m.createErr = err.Error()
+					return m, nil
+				}
+				m.createErr = ""
+				m.sessions = sessions
+				for i, session := range sessions {
+					if session.Name == name {
+						m.cursor = i
+						break
+					}
+				}
+				return m, nil
+
+			case "backspace":
+				if len(m.newSessionName) > 0 {
+					m.newSessionName = m.newSessionName[:len(m.newSessionName)-1]
+				}
+				return m, nil
+
+			default:
+				s := msg.String()
+				if len(s) == 1 {
+					m.newSessionName += s
+				}
+				return m, nil
+			}
+		}
+
 		// Normal mode
 		switch msg.String() {
 		case "ctrl+c", "q", "esc":
@@ -143,6 +216,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.renaming = true
 				m.newName = ""
 			}
+
+		case "n":
+			m.creating = true
+			m.newSessionName = ""
+			m.createErr = ""
 		}
 	}
 
@@ -159,37 +237,49 @@ func (m model) View() string {
 		return errorStyle.Render(fmt.Sprintf("Error: %v\n", m.err))
 	}
 
-	if len(m.sessions) == 0 {
-		return helpStyle.Render("No tmux sessions found.\n")
-	}
-
 	var s strings.Builder
 
 	// Title
 	s.WriteString(titleStyle.Render("tmux session manager"))
 	s.WriteString("\n\n")
 
-	// Session list
-	for i, session := range m.sessions {
-		cursor := "  "
-		if m.cursor == i {
-			cursor = "> "
-		}
+	if len(m.sessions) == 0 {
+		s.WriteString(helpStyle.Render("No tmux sessions found."))
+		s.WriteString("\n")
+	} else {
+		// Session list
+		for i, session := range m.sessions {
+			cursor := "  "
+			if m.cursor == i {
+				cursor = "> "
+			}
 
-		attachedIndicator := "  "
-		if session.Attached {
-			attachedIndicator = " •"
-		}
+			attachedIndicator := "  "
+			if session.Attached {
+				attachedIndicator = " •"
+			}
 
-		sessionInfo := fmt.Sprintf("%s%-20s %d windows%s", cursor, session.Name, session.Windows, attachedIndicator)
+			sessionInfo := fmt.Sprintf("%s%-20s %d windows%s", cursor, session.Name, session.Windows, attachedIndicator)
 
-		if m.cursor == i {
-			s.WriteString(selectedStyle.Render(sessionInfo))
-		} else if session.Attached {
-			s.WriteString(dimStyle.Render(sessionInfo))
-		} else {
-			s.WriteString(normalStyle.Render(sessionInfo))
+			if m.cursor == i {
+				s.WriteString(selectedStyle.Render(sessionInfo))
+			} else if session.Attached {
+				s.WriteString(dimStyle.Render(sessionInfo))
+			} else {
+				s.WriteString(normalStyle.Render(sessionInfo))
+			}
+			s.WriteString("\n")
 		}
+	}
+
+	// Create input
+	if m.creating {
+		s.WriteString("\n")
+		s.WriteString(fmt.Sprintf("  New session name: %s█", m.newSessionName))
+		s.WriteString("\n")
+	} else if m.createErr != "" {
+		s.WriteString("\n")
+		s.WriteString(errorStyle.Render(fmt.Sprintf("  Error: %s", m.createErr)))
 		s.WriteString("\n")
 	}
 
@@ -204,12 +294,29 @@ func (m model) View() string {
 	s.WriteString("\n")
 	if m.renaming {
 		s.WriteString(helpStyle.Render("  enter: confirm • esc: cancel"))
+	} else if m.creating {
+		s.WriteString(helpStyle.Render("  enter: create • esc: cancel"))
+	} else if len(m.sessions) == 0 {
+		s.WriteString(helpStyle.Render("  n: create • q/esc: quit"))
 	} else {
-		s.WriteString(helpStyle.Render("  ↑/↓/j/k: navigate • enter: attach • r: rename • q/esc: quit"))
+		s.WriteString(helpStyle.Render("  ↑/↓/j/k: navigate • enter: attach • r: rename • n: new • q/esc: quit"))
 	}
 	s.WriteString("\n")
 
 	return s.String()
+}
+
+// createSession creates a detached tmux session
+func createSession(name string) error {
+	cmd := exec.Command("tmux", "new-session", "-d", "-s", name)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if msg := strings.TrimSpace(string(output)); msg != "" {
+			return fmt.Errorf("%s: %w", msg, err)
+		}
+		return fmt.Errorf("failed to create session: %w", err)
+	}
+	return nil
 }
 
 // renameSession renames a tmux session
@@ -256,6 +363,34 @@ func getSessions() ([]Session, error) {
 	return sessions, nil
 }
 
+// attachSessionFn is a test seam for the attach step (defaults to the real
+// exec-based attachSession).
+var attachSessionFn = attachSession
+
+// attachSession replaces the current process with tmux attach-session for
+// the named session. It returns only if the exec fails.
+func attachSession(name string) error {
+	binary, err := exec.LookPath("tmux")
+	if err != nil {
+		return fmt.Errorf("tmux not found: %w", err)
+	}
+
+	if err := syscall.Exec(binary, []string{"tmux", "attach-session", "-t", name}, os.Environ()); err != nil {
+		return fmt.Errorf("attach to session %q: %w", name, err)
+	}
+	return nil // unreachable: syscall.Exec replaces the process on success
+}
+
+// attachSelected attaches to the selected session, if any. It returns nil
+// when no session was selected or when m is not the app's model.
+func attachSelected(m tea.Model) error {
+	finalModel, ok := m.(model)
+	if !ok || finalModel.selected == nil {
+		return nil
+	}
+	return attachSessionFn(finalModel.selected.Name)
+}
+
 func main() {
 	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
 		fmt.Printf("tmgr %s\n", version)
@@ -275,17 +410,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Check if a session was selected
-	if finalModel, ok := m.(model); ok && finalModel.selected != nil {
-		// Attach to the selected tmux session
-		attachCmd := exec.Command("tmux", "attach-session", "-t", finalModel.selected.Name)
-		attachCmd.Stdin = os.Stdin
-		attachCmd.Stdout = os.Stdout
-		attachCmd.Stderr = os.Stderr
-
-		if err := attachCmd.Run(); err != nil {
-			fmt.Println(errorStyle.Render(fmt.Sprintf("Error attaching to session: %v", err)))
-			os.Exit(1)
-		}
+	// Attach to the selected session, if any. On success this process is
+	// replaced by tmux, so this returns only on error.
+	if err := attachSelected(m); err != nil {
+		fmt.Println(errorStyle.Render(fmt.Sprintf("Error: %v", err)))
+		os.Exit(1)
 	}
 }
