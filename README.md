@@ -6,7 +6,8 @@ A terminal UI for managing tmux sessions.
 
 - List all tmux sessions
 - Navigate with arrow keys (↑/↓) or vim keys (j/k)
-- Attach to a session with Enter
+- Attach to a session with Enter — or, when tmgr is started inside a tmux
+  session, switch the current client to it instead of nesting a new one
 - Visual indicator for attached sessions
 - Rename sessions
 
@@ -33,13 +34,13 @@ tmgr
 
 ### Keybindings
 
-| Key         | Action                    |
-|-------------|---------------------------|
-| ↑ / k       | Move up                   |
-| ↓ / j       | Move down                 |
-| Enter / Space | Attach to session       |
-| r           | Rename session             |
-| q / Esc     | Quit                      |
+| Key           | Action                                                              |
+|---------------|---------------------------------------------------------------------|
+| ↑ / k         | Move up                                                             |
+| ↓ / j         | Move down                                                           |
+| Enter / Space | Attach to session (switch the client when running inside tmux)       |
+| r             | Rename session                                                      |
+| q / Esc       | Quit                                                                |
 
 ## Building
 

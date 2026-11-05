@@ -17,6 +17,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -24,6 +25,28 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+// TestMain makes the suite environment-agnostic: a developer running the tests
+// from inside a tmux pane must get the same results as one running outside.
+func TestMain(m *testing.M) {
+	original, hadTMUX := os.LookupEnv("TMUX")
+	os.Unsetenv("TMUX")
+	code := m.Run()
+	if hadTMUX {
+		os.Setenv("TMUX", original)
+	}
+	os.Exit(code)
+}
+
+// setInsideTmux controls the environment that detectInsideTmux reads.
+func setInsideTmux(t *testing.T, inside bool) {
+	t.Helper()
+	if inside {
+		t.Setenv("TMUX", "/tmp/tmux-0/tmgr-test,1234,0")
+		return
+	}
+	t.Setenv("TMUX", "")
+}
 
 func TestCompileSmoke(t *testing.T) {
 	_ = model{}
@@ -246,15 +269,45 @@ func TestEmptyStateHelpReplacedByCreateMode(t *testing.T) {
 	}
 }
 
-func TestNonEmptyStateKeepsGenericHelp(t *testing.T) {
+func TestNonEmptyStateHelpOutsideTmux(t *testing.T) {
+	setInsideTmux(t, false)
 	m := initialModel([]Session{{Name: "main", Windows: 1}})
 
 	view := m.View()
 	if !strings.Contains(view, "enter: attach") {
 		t.Errorf("generic help expected for non-empty list, got: %q", view)
 	}
+	if strings.Contains(view, "enter: switch") {
+		t.Errorf("help must not advertise switching outside tmux, got: %q", view)
+	}
 	if strings.Contains(view, "No tmux sessions found.") {
 		t.Errorf("empty-state message must not render with sessions, got: %q", view)
+	}
+}
+
+func TestNonEmptyStateHelpInsideTmux(t *testing.T) {
+	setInsideTmux(t, true)
+	m := initialModel([]Session{{Name: "main", Windows: 1}})
+
+	view := m.View()
+	if !strings.Contains(view, "enter: switch") {
+		t.Errorf("help should advertise switch when inside tmux, got: %q", view)
+	}
+	if strings.Contains(view, "enter: attach") {
+		t.Errorf("help must not advertise attach when inside tmux, got: %q", view)
+	}
+}
+
+func TestEmptyStateHelpInsideTmuxDoesNotAdvertiseActivation(t *testing.T) {
+	setInsideTmux(t, true)
+	m := initialModel(nil)
+
+	view := m.View()
+	if !strings.Contains(view, "n: create • q/esc: quit") {
+		t.Errorf("empty-state help expected, got: %q", view)
+	}
+	if strings.Contains(view, "enter:") {
+		t.Errorf("empty-state help must not advertise activation, got: %q", view)
 	}
 }
 
@@ -265,6 +318,72 @@ type otherModel struct{}
 func (otherModel) Init() tea.Cmd                       { return nil }
 func (otherModel) Update(tea.Msg) (tea.Model, tea.Cmd) { return nil, nil }
 func (otherModel) View() string                        { return "" }
+
+func TestDetectInsideTmux(t *testing.T) {
+	t.Setenv("TMUX", "/tmp/tmux-0/tmgr-test,1234,0")
+	if !detectInsideTmux() {
+		t.Error("expected inside-tmux detection when TMUX is set")
+	}
+
+	t.Setenv("TMUX", "")
+	if detectInsideTmux() {
+		t.Error("expected outside-tmux detection when TMUX is empty")
+	}
+}
+
+func TestSwitchClientMissingTmuxReturnsError(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	err := switchClient("does-not-matter")
+	if err == nil {
+		t.Fatal("expected error when tmux is not on PATH")
+	}
+	if !strings.Contains(err.Error(), "tmux not found") {
+		t.Errorf("expected 'tmux not found' in error, got: %v", err)
+	}
+}
+
+func TestSwitchClientNoCurrentClientIntegration(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+
+	server := fmt.Sprintf("tmgr-it-%d", time.Now().UnixNano())
+	private := func(args ...string) (string, error) {
+		out, err := exec.Command("tmux", append([]string{"-L", server}, args...)...).Output()
+		return strings.TrimSpace(string(out)), err
+	}
+	if _, err := private("new-session", "-d", "-s", "keep"); err != nil {
+		t.Skipf("tmux environment unavailable: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = exec.Command("tmux", "-L", server, "kill-server").Run()
+	})
+
+	socketPath, err := private("display-message", "-p", "-t", "keep", "#{socket_path}")
+	if err != nil || socketPath == "" {
+		t.Skipf("cannot determine private socket path for %q: %v", server, err)
+	}
+	serverPID, err := private("display-message", "-p", "-t", "keep", "#{pid}")
+	if err != nil || serverPID == "" {
+		t.Skipf("cannot determine private server pid for %q: %v", server, err)
+	}
+	sessionID, err := private("display-message", "-p", "-t", "keep", "#{session_id}")
+	if err != nil || sessionID == "" {
+		t.Skipf("cannot determine session id for %q: %v", server, err)
+	}
+
+	// Point tmux at the private server that has no attached client, so the real
+	// switch-client command runs and its stderr is captured without a pty.
+	t.Setenv("TMUX", fmt.Sprintf("%s,%s,%s", socketPath, serverPID, strings.TrimPrefix(sessionID, "$")))
+
+	err = switchClient("keep")
+	if err == nil {
+		t.Fatal("expected switch to fail without an attached client")
+	}
+	if !strings.Contains(err.Error(), "current client") {
+		t.Errorf("expected 'current client' in error, got: %v", err)
+	}
+}
 
 func TestAttachSessionMissingTmuxReturnsError(t *testing.T) {
 	t.Setenv("PATH", t.TempDir()) // ensure tmux is not resolvable
@@ -277,48 +396,100 @@ func TestAttachSessionMissingTmuxReturnsError(t *testing.T) {
 	}
 }
 
-func TestAttachSelectedNoSelection(t *testing.T) {
-	old := attachSessionFn
-	called := false
-	attachSessionFn = func(string) error { called = true; return nil }
-	t.Cleanup(func() { attachSessionFn = old })
+// stubActivation replaces both activation actions and records which was used.
+func stubActivation(t *testing.T, attachErr, switchErr error) (attached, switched *[]string) {
+	t.Helper()
+	oldAttach, oldSwitch := attachSessionFn, switchClientFn
+	attachNames := []string{}
+	switchNames := []string{}
+	attachSessionFn = func(name string) error {
+		attachNames = append(attachNames, name)
+		return attachErr
+	}
+	switchClientFn = func(name string) error {
+		switchNames = append(switchNames, name)
+		return switchErr
+	}
+	t.Cleanup(func() { attachSessionFn, switchClientFn = oldAttach, oldSwitch })
+	return &attachNames, &switchNames
+}
+
+func TestActivateSelectedNoSelection(t *testing.T) {
+	attached, switched := stubActivation(t, nil, nil)
 
 	m := initialModel([]Session{{Name: "main"}})
-	if err := attachSelected(m); err != nil {
+	if err := activateSelected(m); err != nil {
 		t.Fatalf("expected nil for no selection, got: %v", err)
 	}
-	if called {
-		t.Error("attach must not be called when nothing is selected")
+	if len(*attached) != 0 || len(*switched) != 0 {
+		t.Errorf("no activation expected without a selection, got attach=%v switch=%v", *attached, *switched)
 	}
 }
 
-func TestAttachSelectedCallsAttachWithName(t *testing.T) {
-	old := attachSessionFn
-	gotName := ""
+func TestActivateSelectedNonModelReturnsNil(t *testing.T) {
+	setInsideTmux(t, true)
+	attached, switched := stubActivation(t, nil, nil)
+
+	if err := activateSelected(otherModel{}); err != nil {
+		t.Fatalf("expected nil for non-model, got: %v", err)
+	}
+	if len(*attached) != 0 || len(*switched) != 0 {
+		t.Errorf("no activation expected for a non-model, got attach=%v switch=%v", *attached, *switched)
+	}
+}
+
+func TestActivateSelectedOutsideCallsAttach(t *testing.T) {
+	setInsideTmux(t, false)
 	sentinel := errors.New("boom")
-	attachSessionFn = func(name string) error { gotName = name; return sentinel }
-	t.Cleanup(func() { attachSessionFn = old })
+	attached, switched := stubActivation(t, sentinel, nil)
 
 	m := initialModel([]Session{{Name: "dev"}})
 	m.selected = &m.sessions[0]
 
-	if err := attachSelected(m); err != sentinel {
+	if err := activateSelected(m); err != sentinel {
 		t.Fatalf("expected sentinel error, got: %v", err)
 	}
-	if gotName != "dev" {
-		t.Errorf("expected attach for %q, got %q", "dev", gotName)
+	if len(*attached) != 1 || (*attached)[0] != "dev" {
+		t.Errorf("expected attach for %q, got %v", "dev", *attached)
+	}
+	if len(*switched) != 0 {
+		t.Errorf("switch must not be called outside tmux, got %v", *switched)
 	}
 }
 
-func TestAttachSelectedNonModelReturnsNil(t *testing.T) {
-	old := attachSessionFn
-	attachSessionFn = func(string) error {
-		t.Error("attach must not be called for a non-model value")
-		return nil
-	}
-	t.Cleanup(func() { attachSessionFn = old })
+func TestActivateSelectedInsideCallsSwitch(t *testing.T) {
+	setInsideTmux(t, true)
+	attached, switched := stubActivation(t, nil, nil)
 
-	if err := attachSelected(otherModel{}); err != nil {
-		t.Fatalf("expected nil for non-model, got: %v", err)
+	m := initialModel([]Session{{Name: "dev"}})
+	m.selected = &m.sessions[0]
+
+	if err := activateSelected(m); err != nil {
+		t.Fatalf("expected nil, got: %v", err)
+	}
+	if len(*switched) != 1 || (*switched)[0] != "dev" {
+		t.Errorf("expected switch to %q, got %v", "dev", *switched)
+	}
+	if len(*attached) != 0 {
+		t.Errorf("attach must never be called inside tmux (nested session), got %v", *attached)
+	}
+}
+
+func TestActivateSelectedInsideSwitchErrorPropagates(t *testing.T) {
+	setInsideTmux(t, true)
+	sentinel := errors.New("no current client")
+	attached, switched := stubActivation(t, nil, sentinel)
+
+	m := initialModel([]Session{{Name: "dev"}})
+	m.selected = &m.sessions[0]
+
+	if err := activateSelected(m); err != sentinel {
+		t.Fatalf("expected switch error to propagate, got: %v", err)
+	}
+	if len(*switched) != 1 {
+		t.Errorf("expected one switch attempt, got %v", *switched)
+	}
+	if len(*attached) != 0 {
+		t.Errorf("attach must not be attempted after a switch failure, got %v", *attached)
 	}
 }

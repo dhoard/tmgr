@@ -78,6 +78,7 @@ type model struct {
 	creating       bool
 	newSessionName string
 	createErr      string
+	insideTmux     bool
 	err            error
 }
 
@@ -90,8 +91,9 @@ var (
 // Initial model
 func initialModel(sessions []Session) model {
 	return model{
-		sessions: sessions,
-		cursor:   0,
+		sessions:   sessions,
+		cursor:     0,
+		insideTmux: detectInsideTmux(),
 	}
 }
 
@@ -299,7 +301,13 @@ func (m model) View() string {
 	} else if len(m.sessions) == 0 {
 		s.WriteString(helpStyle.Render("  n: create • q/esc: quit"))
 	} else {
-		s.WriteString(helpStyle.Render("  ↑/↓/j/k: navigate • enter: attach • r: rename • n: new • q/esc: quit"))
+		action := "attach"
+		if m.insideTmux {
+			// Attaching from inside a tmux client would nest a session; switch the
+			// existing client to the selected session instead.
+			action = "switch"
+		}
+		s.WriteString(helpStyle.Render(fmt.Sprintf("  ↑/↓/j/k: navigate • enter: %s • r: rename • n: new • q/esc: quit", action)))
 	}
 	s.WriteString("\n")
 
@@ -363,16 +371,35 @@ func getSessions() ([]Session, error) {
 	return sessions, nil
 }
 
-// attachSessionFn is a test seam for the attach step (defaults to the real
-// exec-based attachSession).
-var attachSessionFn = attachSession
+// Test seams for the activation step, which depends on whether tmgr runs inside
+// a tmux client session.
+var (
+	attachSessionFn = attachSession
+	switchClientFn  = switchClient
+)
+
+// detectInsideTmux reports whether tmgr was started from inside a tmux client
+// session. tmux sets TMUX in the environment of every command it runs.
+func detectInsideTmux() bool {
+	return os.Getenv("TMUX") != ""
+}
+
+// tmuxBinary resolves the tmux binary so both activation paths report a
+// missing tmux identically.
+func tmuxBinary() (string, error) {
+	binary, err := exec.LookPath("tmux")
+	if err != nil {
+		return "", fmt.Errorf("tmux not found: %w", err)
+	}
+	return binary, nil
+}
 
 // attachSession replaces the current process with tmux attach-session for
 // the named session. It returns only if the exec fails.
 func attachSession(name string) error {
-	binary, err := exec.LookPath("tmux")
+	binary, err := tmuxBinary()
 	if err != nil {
-		return fmt.Errorf("tmux not found: %w", err)
+		return err
 	}
 
 	if err := syscall.Exec(binary, []string{"tmux", "attach-session", "-t", name}, os.Environ()); err != nil {
@@ -381,12 +408,36 @@ func attachSession(name string) error {
 	return nil // unreachable: syscall.Exec replaces the process on success
 }
 
-// attachSelected attaches to the selected session, if any. It returns nil
-// when no session was selected or when m is not the app's model.
-func attachSelected(m tea.Model) error {
+// switchClient points the current tmux client at the named session. Unlike
+// attachSession it does not replace the process, so it can report failure.
+func switchClient(name string) error {
+	binary, err := tmuxBinary()
+	if err != nil {
+		return err
+	}
+
+	cmd := exec.Command(binary, "switch-client", "-t", name)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if msg := strings.TrimSpace(string(output)); msg != "" {
+			return fmt.Errorf("%s: %w", msg, err)
+		}
+		return fmt.Errorf("failed to switch to session %q: %w", name, err)
+	}
+	return nil
+}
+
+// activateSelected activates the selected session, if any, using the action
+// that is valid in the current context: attach outside tmux, switch the
+// existing client inside tmux. It returns nil when no session was selected or
+// when m is not the app's model.
+func activateSelected(m tea.Model) error {
 	finalModel, ok := m.(model)
 	if !ok || finalModel.selected == nil {
 		return nil
+	}
+	if finalModel.insideTmux {
+		return switchClientFn(finalModel.selected.Name)
 	}
 	return attachSessionFn(finalModel.selected.Name)
 }
@@ -410,9 +461,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Attach to the selected session, if any. On success this process is
-	// replaced by tmux, so this returns only on error.
-	if err := attachSelected(m); err != nil {
+	// Activate the selected session, if any. Outside tmux this process is
+	// replaced by tmux on success, so attach errors are the only return; inside
+	// tmux the existing client is switched and failures are reported here.
+	if err := activateSelected(m); err != nil {
 		fmt.Println(errorStyle.Render(fmt.Sprintf("Error: %v", err)))
 		os.Exit(1)
 	}
