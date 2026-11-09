@@ -79,7 +79,6 @@ type model struct {
 	newSessionName string
 	createErr      string
 	insideTmux     bool
-	err            error
 }
 
 // Test seams for the tmux-backed functions used in the create flow
@@ -109,6 +108,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Handle rename mode
 		if m.renaming {
 			switch msg.String() {
+			case "ctrl+c":
+				m.quitting = true
+				return m, tea.Quit
+
 			case "esc":
 				m.renaming = false
 				m.newName = ""
@@ -118,9 +121,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.newName != "" {
 					err := renameSession(m.sessions[m.cursor].Name, m.newName)
 					if err != nil {
-						m.err = err
+						m.createErr = err.Error()
 					} else {
+						m.createErr = ""
 						m.sessions[m.cursor].Name = m.newName
+						// tmux may adjust the name (e.g. ':' and '.' become '_'),
+						// so reload the sessions to show the name it actually used.
+						if sessions, err := getSessionsFn(); err == nil {
+							m.sessions = sessions
+							want := tmuxSessionName(m.newName)
+							for i, session := range sessions {
+								if session.Name == want {
+									m.cursor = i
+									break
+								}
+							}
+							if m.cursor >= len(m.sessions) {
+								m.cursor = len(m.sessions) - 1
+							}
+							if m.cursor < 0 {
+								m.cursor = 0
+							}
+						}
 					}
 				}
 				m.renaming = false
@@ -145,6 +167,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Handle create mode
 		if m.creating {
 			switch msg.String() {
+			case "ctrl+c":
+				m.quitting = true
+				return m, tea.Quit
+
 			case "esc":
 				m.creating = false
 				m.newSessionName = ""
@@ -217,6 +243,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.sessions) > 0 {
 				m.renaming = true
 				m.newName = ""
+				m.createErr = ""
 			}
 
 		case "n":
@@ -233,10 +260,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) View() string {
 	if m.quitting {
 		return ""
-	}
-
-	if m.err != nil {
-		return errorStyle.Render(fmt.Sprintf("Error: %v\n", m.err))
 	}
 
 	var s strings.Builder
@@ -261,7 +284,12 @@ func (m model) View() string {
 				attachedIndicator = " •"
 			}
 
-			sessionInfo := fmt.Sprintf("%s%-20s %d windows%s", cursor, session.Name, session.Windows, attachedIndicator)
+			windowLabel := "windows"
+			if session.Windows == 1 {
+				windowLabel = "window"
+			}
+
+			sessionInfo := fmt.Sprintf("%s%-20s %d %s%s", cursor, session.Name, session.Windows, windowLabel, attachedIndicator)
 
 			if m.cursor == i {
 				s.WriteString(selectedStyle.Render(sessionInfo))
@@ -327,10 +355,23 @@ func createSession(name string) error {
 	return nil
 }
 
+// tmuxSessionName returns the name tmux stores for a requested session name:
+// it replaces ':' and '.' with '_'.
+func tmuxSessionName(name string) string {
+	return strings.NewReplacer(":", "_", ".", "_").Replace(name)
+}
+
 // renameSession renames a tmux session
 func renameSession(oldName, newName string) error {
 	cmd := exec.Command("tmux", "rename-session", "-t", oldName, newName)
-	return cmd.Run()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if msg := strings.TrimSpace(string(output)); msg != "" {
+			return fmt.Errorf("%s: %w", msg, err)
+		}
+		return fmt.Errorf("failed to rename session: %w", err)
+	}
+	return nil
 }
 
 // getSessions retrieves tmux sessions

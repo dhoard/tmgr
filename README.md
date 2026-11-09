@@ -10,6 +10,7 @@ A terminal UI for managing tmux sessions.
   session, switch the current client to it instead of nesting a new one
 - Visual indicator for attached sessions
 - Rename sessions
+- Create new sessions
 
 ## Installation
 
@@ -40,6 +41,7 @@ tmgr
 | ↓ / j         | Move down                                                           |
 | Enter / Space | Attach to session (switch the client when running inside tmux)       |
 | r             | Rename session                                                      |
+| n             | Create new session                                                  |
 | q / Esc       | Quit                                                                |
 
 ## Building
